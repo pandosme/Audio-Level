@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Level Monitoring</title>
+    <link rel="stylesheet" href="css/bootstrap.min.css">
+    <link rel="stylesheet" href="css/app.css">
+    <script src="js/paho-mqtt-min.js"></script>
+    <script src="js/jquery-3.7.1.min.js"></script>
+    <script src="js/bootstrap.bundle.min.js"></script>
+    <script src="js/media-stream-player.min.js"></script>
+    <style>
+        #level-chart { background: #fafafa; border: 1px solid #ccc; }
+        .connection-status { padding: 0.5em 1em; border-radius: 6px; margin-left: 12px; }
+        .switch-label {
+            font-weight: bold;
+            margin-right: 10px;
+        }
+        .help-block {
+            color: #666;
+            font-size: 0.94em;
+            margin-bottom: 0.6em;
+        }
+        .mt-3 { margin-top: 1rem; }
+    </style>
+</head>
+<body>
+<div class="d-flex" id="wrapper">
+    <div class="bg-light border-right" id="sidebar-wrapper">
+        <div class="sidebar-heading">&nbsp;</div>
+        <div class="list-group list-group-flush">
+            <a href="index.html" class="list-group-item list-group-item-action active">Settings</a>
+            <a href="mqtt.html" class="list-group-item list-group-item-action">MQTT</a>
+            <a href="about.html" class="list-group-item list-group-item-action">About</a>
+        </div>
+    </div>
+    <div id="page-content-wrapper" class="p-0">
+        <div class="container-fluid">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h3> Audio level monitoring</h3>
+                        <div id="connectionStatus" class="connection-status">
+                            <span id="statusMessage">Connected</span>
+                        </div>
+                    </div>
+					<div class="card-body" id="visual-row">
+					  <div class="row align-items-start">
+						<!-- Video Left -->
+						<div class="col-lg-6 col-md-6">
+						  <div id="video-view" style="display:block">
+							<div style="width:100%; height:100%; position:relative">
+							  <div id="video" style="width:100%; height:100%; position:absolute; top:0; left:0;"></div>
+							  <canvas id="canvas" width="1000" height="1000" style="width:100%; height:100%; position:absolute; top:0px; left:0px;"></canvas>
+							</div>
+						  </div>
+						  <!-- Graph directly below video (left aligned) -->
+						  <div class="mt-3" style="width:100%;">
+							<canvas id="level-chart" width="640" height="300"></canvas>
+						  </div>
+						</div>
+						<!-- Settings Right -->
+						<div class="col-lg-4 col-md-5 ms-lg-4 ms-md-4">
+						  <form id="level-settings-form2" class="g-3">
+							<div class="form-group mb-3">
+							  <label for="interval" class="form-label">Sampling Interval:</label>
+							  <input type="number" id="interval" class="form-control w-30" min="1" max="15" value="2">
+							</div>
+							<div class="mb-3">
+							  <span class="switch-label">Ambient Relative Thresholds</span>
+							  <div class="form-check form-switch align-middle d-inline-block">
+								<input class="form-check-input" type="checkbox" id="dynamicSwitch">
+								<label class="form-check-label" for="dynamicSwitch"></label>
+							  </div>
+							</div>
+							<div class="form-group mb-3">
+							  <label for="alert" class="form-label">Alert:</label>
+							  <select id="alert" class="form-control w-100"></select>
+							</div>
+							<div class="form-group mb-3">
+							  <label for="normal" class="form-label">Normal</label>
+							  <select id="normal" class="form-control w-100"></select>
+							</div>
+							<button type="submit" class="btn btn-primary w-100 mt-2">Save Settings</button>
+						  </form>
+						</div>
+					  </div>
+					</div>
+				  </div>
+			</div>
+		</div>
+	</div>
+	<div class="toast-container position-fixed top-0 start-50 translate-middle-x p-3" style="z-index:9999;">	
+</div>
+
+
+<script>
+let MQTT_Client = 0;
+var app = null;
+const LEVEL_MAX_POINTS = 100;
+let levelData = [];
+let ambientData = [];
+let alertData = [];
+let normalData = [];
+let chartYMin = -60;
+let chartYMax = 0;
+
+const DYNAMIC_ALERT_OPTIONS = [
+    {value: 10,  text: "10 dB above ambient (very robust, 3.16x)"},
+    {value: 8,   text: "8 dB above ambient (2.5x)"},
+    {value: 6,   text: "6 dB above ambient (2x, normal speech)"},
+    {value: 4,   text: "4 dB above ambient (1.58x)"},
+    {value: 3,   text: "3 dB above ambient (1.41x, sensitive)"},
+];
+const DYNAMIC_NORMAL_OPTIONS = [
+    {value: 7,  text: "7 dB above ambient"},
+    {value: 5,  text: "5 dB above ambient"},
+    {value: 3,  text: "3 dB above ambient"},
+    {value: 2,  text: "2 dB above ambient"},
+    {value: 1,  text: "1 dB above ambient"}
+];
+const FIXED_ALERT_OPTIONS = [
+    {value: -10, text:"-10 dBFS (very loud)"},
+    {value: -12, text:"-12 dBFS"},
+    {value: -14, text:"-14 dBFS"},
+    {value: -16, text:"-16 dBFS (default, loud)"},
+    {value: -18, text:"-18 dBFS"},
+    {value: -20, text:"-20 dBFS (louder-than-talking)"},
+    {value: -22, text:"-22 dBFS"},
+    {value: -25, text:"-25 dBFS (soft, very sensitive)"}
+];
+const FIXED_NORMAL_OPTIONS = [
+    {value: -14, text:"-14 dBFS"},
+    {value: -16, text:"-16 dBFS"},
+    {value: -18, text:"-18 dBFS"},
+    {value: -20, text:"-20 dBFS (default)"},
+    {value: -22, text:"-22 dBFS"},
+    {value: -24, text:"-24 dBFS"},
+    {value: -26, text:"-26 dBFS"}
+];
+
+function updateThresholdDropdowns(dynamic) {
+    const alertSelect = $("#alert");
+    const normalSelect = $("#normal");
+    alertSelect.empty();
+    normalSelect.empty();
+
+    if(dynamic) {
+        DYNAMIC_ALERT_OPTIONS.forEach(option => 
+            alertSelect.append($('<option/>').val(option.value).text(option.text))
+        );
+        DYNAMIC_NORMAL_OPTIONS.forEach(option =>
+            normalSelect.append($('<option/>').val(option.value).text(option.text))
+        );
+        $("#settingsHelp").text("Dynamic: Threshold is relative to ambient background (adaptive, robust).");
+    } else {
+        FIXED_ALERT_OPTIONS.forEach(option => 
+            alertSelect.append($('<option/>').val(option.value).text(option.text))
+        );
+        FIXED_NORMAL_OPTIONS.forEach(option =>
+            normalSelect.append($('<option/>').val(option.value).text(option.text))
+        );
+        $("#settingsHelp").text("Fixed: Threshold is absolute digital audio level in dBFS (not adaptive).");
+    }
+}
+
+function getThresholdValues(dynamic) {
+    let high = parseFloat($("#alert").val());
+    let low = parseFloat($("#normal").val());
+    return {high, low};
+}
+
+function LoadSettings() {
+    $.ajax({
+        type: "GET",
+        url: 'app',
+        dataType: 'json',
+        cache: false,
+        success: function(data) {
+            app = data;
+            document.title = app.manifest.acapPackageConf.setup.friendlyName;
+            $('.sidebar-heading').text(app.manifest.acapPackageConf.setup.friendlyName);
+            const aspectRatio = app.device.aspect || '16:9';
+            const [aspectWidth, aspectHeight] = aspectRatio.split(':').map(Number);
+            const paddingPercentage = (aspectHeight / aspectWidth) * 100;
+            $('.video-panel').css('padding-top', `${paddingPercentage}%`);
+            PlayVideo(aspectRatio);
+
+            // Prepare UI
+            let dynamic = (app.settings.level && app.settings.level.dynamic !== undefined) ? !!app.settings.level.dynamic : true;
+            $("#dynamicSwitch").prop('checked', dynamic);
+
+            updateThresholdDropdowns(dynamic);
+
+            if(app.settings && app.settings.level) {
+                $("#interval").val(app.settings.level.interval);
+                // Alert/Normal default from settings if matches list, else default to first
+                $("#alert").val(dynamic ? app.settings.level.dynamicAlert : app.settings.level.fixedAlert);
+                $("#normal").val(dynamic ? app.settings.level.dynamicNormal : app.settings.level.fixedNormal);
+            }
+            if(app.status.mqtt.connected) {
+                ConnectWebSocketClient();
+            } else {
+                setTimeout(() => {
+                    updateConnectionStatus('disconnected');
+                    showToast("Not connected to broker. Go to MQTT Settings","warning");
+                }, 100);
+            }
+        },
+        error: function(response) {
+            showToast("No settings available","warning");
+        }
+    });
+}
+
+$(document).ready(function() {
+    $("#dynamicSwitch").on('change', function() {
+        // Update dropdowns and graph thresholds
+        updateThresholdDropdowns(this.checked);
+        drawLevelChart();
+    });
+
+    $.ajax({
+        type: "POST",
+        url: '/axis-cgi/audiodevicecontrol.cgi',
+        dataType: 'json',
+        contentType: "application/json",
+        data: '{"apiVersion": "1.0","context": "abc","method": "getDevicesCapabilities" }',
+        success: function(response) {
+            var inputs = response;
+            if( !inputs.hasOwnProperty("data") ) {
+                showToast("No audio inputs available","warning");          
+                return;
+            }
+            inputs = inputs.data.devices;
+            if( inputs.length < 1 ) {
+                showToast("No audio inputs available","warning");          
+                return;
+            }
+            inputs = inputs[0].inputs;
+            if( inputs.length < 1 ) {
+                showToast("No audio inputs available","warning");          
+                return;
+            }
+            inputs = inputs[0].connectionTypes;
+            if( inputs.length < 1 ) {
+                showToast("No audio inputs available","warning");          
+                return;
+            }
+            var inputSelect = $('#audio_input');
+            for( var i = 0; i < inputs.length; i++ ) {
+                if( inputs[i].id == "internal" )
+                    inputSelect.append($('<option/>').val(i).text("Built-in microphone"));
+                if( inputs[i].id == "mic" )
+                    inputSelect.append($('<option/>').val(i).text("External microphone"));
+                if( inputs[i].id == "line" )
+                    inputSelect.append($('<option/>').val(i).text("Line input"));
+                if( inputs[i].id == "digital" )
+                    inputSelect.append($('<option/>').val(i).text("Digital Input"));
+            }
+            LoadSettings();
+        },
+        error: function(data) {
+            showToast("No settings available","warning");
+        }
+    });
+});
+
+function drawLevelChart() {
+    const canvas = document.getElementById('level-chart');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // Draw Y-axis labels/lines
+    ctx.save();
+    ctx.fillStyle = "#222";
+    ctx.font = "13px sans-serif";
+    for (let db = chartYMin; db <= chartYMax; db += 10) {
+        const y = scaleY(db, canvas.height);
+        ctx.fillText(db + " dB", 2, y + 3);
+        ctx.beginPath();
+        ctx.strokeStyle = "#eee";
+        ctx.moveTo(0, y);
+        ctx.lineTo(canvas.width, y);
+        ctx.stroke();
+    }
+    ctx.restore();
+
+    if (ambientData.length > 1) {
+        ctx.strokeStyle = "#888";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < ambientData.length; i++) {
+            let x = (i / LEVEL_MAX_POINTS) * canvas.width;
+            let y = scaleY(ambientData[i], canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+    if (levelData.length > 1) {
+        ctx.strokeStyle = "#007bff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for (let i = 0; i < levelData.length; i++) {
+            let x = (i / LEVEL_MAX_POINTS) * canvas.width;
+            let y = scaleY(levelData[i], canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+
+        ctx.fillStyle = "#007bff";
+        ctx.font = "15px Arial";
+        let last = levelData[levelData.length - 1];
+        ctx.fillText(last.toFixed(1) + " dB", canvas.width - 85, scaleY(last, canvas.height) - 10);
+    }
+    // Alert/Normal lines (historical, if in dynamic mode)
+    let dynamic = $("#dynamicSwitch").prop("checked");
+    if(dynamic && alertData.length > 1) {
+        ctx.strokeStyle = "#f00";
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        for (let i = 0; i < alertData.length; i++) {
+            let x = (i / LEVEL_MAX_POINTS) * canvas.width;
+            let y = scaleY(alertData[i], canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+    if(dynamic && normalData.length > 1) {
+        ctx.strokeStyle = "#0a0";
+        ctx.lineWidth = 1.3;
+        ctx.beginPath();
+        for (let i = 0; i < normalData.length; i++) {
+            let x = (i / LEVEL_MAX_POINTS) * canvas.width;
+            let y = scaleY(normalData[i], canvas.height);
+            if (i === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+    }
+    // In fixed mode, draw static horizontal lines
+    if(!dynamic && levelData.length > 1) {
+        const { high, low } = getThresholdValues(false);
+        // Fixed alert
+        ctx.strokeStyle = "#f00";
+        ctx.lineWidth = 1.5;
+        let yHigh = scaleY(high, canvas.height);
+        ctx.beginPath();
+        ctx.moveTo(0,yHigh); ctx.lineTo(canvas.width, yHigh); ctx.stroke();
+        ctx.fillStyle = "#f00";
+        ctx.font = "12px Arial";
+        ctx.fillText("Alert: " + high + " dBFS", canvas.width-110, yHigh - 2);
+        // Fixed normal
+        ctx.strokeStyle = "#0a0";
+        ctx.lineWidth = 1.5;
+        let yLow = scaleY(low, canvas.height);
+        ctx.beginPath();
+        ctx.moveTo(0,yLow); ctx.lineTo(canvas.width, yLow); ctx.stroke();
+        ctx.fillStyle = "#0a0";
+        ctx.fillText("Normal: " + low + " dBFS", canvas.width-110, yLow - 2);
+    }
+}
+
+function scaleY(dB, height) {
+    let percent = (dB - chartYMin) / (chartYMax - chartYMin);
+    percent = Math.max(0, Math.min(1, percent));
+    return height - percent * height;
+}
+
+function PlayVideo(aspect) {
+    var width = 640;
+    var height = 360;
+    switch (aspect) {
+        case '4:3': width = 640; height = 360;break;
+        case '1:1': width = 640; height = 640;break;
+        case '16:10': width = 800; height = 500;break;
+        default: width = 640; height = 360;break;
+    }
+    $("#video-view").css("width", width + "px");
+    $("#video-view").css("height", height + "px");
+    var secureConnection = "";
+    if (location.protocol === 'https:')
+        secureConnection = " secure=true"
+    var player = '<media-stream-player hostname="' + window.location.hostname + '"' + secureConnection
+                + ' format="RTP_H264" compression="40" audio="0"'
+                + ' resolution="' + width + 'x' + height + '"'
+                + ' variant="basic" autoplay></media-stream-player>';
+    $("#video").append(player);
+}
+
+function ConnectWebSocketClient() {
+    updateConnectionStatus('connecting');
+    const clientID = "WS-" + app.manifest.acapPackageConf.setup.appName + "-" + app.device.serial + "-" + Math.floor(Math.random() * 10000);
+    if(MQTT_Client)
+        delete MQTT_Client;
+    updateConnectionStatus('connecting');
+    var tls = app.settings.tls;
+    if( location.protocol === 'https:')
+        tls = true;
+    var port = tls?app.settings.WSS_Port:app.settings.WS_Port;
+    MQTT_Client = new Paho.MQTT.Client(app.mqtt.address, port, clientID);
+    MQTT_Client.onConnectionLost = onConnectionLost;
+    MQTT_Client.onMessageArrived = onMessageArrived;
+    var connectionOptions = {
+        useSSL: tls,
+        timeout: 3,
+        onSuccess: onConnect,
+        onFailure: onFailure
+    };
+    if(app.mqtt.user && app.mqtt.user.length)
+        connectionOptions.userName = app.mqtt.user;
+    if(app.mqtt.password && app.mqtt.password.length)
+        connectionOptions.password = app.mqtt.password;
+    MQTT_Client.connect(connectionOptions);
+}
+
+function updateConnectionStatus(status) {
+    const statusElement = document.getElementById('connectionStatus');
+    const messageElement = document.getElementById('statusMessage');
+    switch (status) {
+        case 'connected':
+            statusElement.style.backgroundColor = '#00ff00';
+            messageElement.textContent = 'Web page is connected';
+            break;
+        case 'disconnected':
+            statusElement.style.backgroundColor = '#ff0000';
+            messageElement.textContent = 'Web page is disconnected';
+            break;
+        case 'connecting':
+        case 'reconnecting':
+            statusElement.style.backgroundColor = '#ffff00';
+            messageElement.textContent = "Web page " + status.charAt(0).toUpperCase() + status.slice(1);
+            break;
+        default:
+            console.log('Unknown status:', status);
+    }
+}
+
+function onConnect() {
+    updateConnectionStatus('connected');
+    var topic = app.mqtt.preTopic + "/level/" + app.device.serial;
+    MQTT_Client.subscribe(topic);
+    var stateTopic = app.mqtt.preTopic + "/state/" + app.device.serial;
+    MQTT_Client.subscribe(stateTopic);
+}
+
+function onFailure(message) {
+    updateConnectionStatus('disconnected');    
+    showToast(message.errorMessage + " Check WebSocket connection in MQTT Settings","warning");
+}
+
+function onConnectionLost(responseObject) {
+    if (responseObject.errorCode !== 0) {
+        showToast(responseObject.errorMessage, "warning");
+        updateConnectionStatus('disconnected');
+        setTimeout(() => {
+            ConnectWebSocketClient();
+        }, 5000);
+    }
+}
+
+function onMessageArrived(message) {
+    let payload;
+    try { payload = JSON.parse(message.payloadString); } catch(e) { return; }
+    if (!payload) return;
+    var levelTopic = app.mqtt.preTopic + "/level/" + app.device.serial;
+    var stateTopic = app.mqtt.preTopic + "/state/" + app.device.serial;
+
+    if (message.topic === levelTopic) {
+        if (typeof payload.level === "number" && typeof payload.ambient === "number") {
+            levelData.push(payload.level);
+            ambientData.push(payload.ambient);
+            let dynamic = $("#dynamicSwitch").prop("checked");
+            let { high, low } = getThresholdValues(dynamic);
+
+            // Push corresponding threshold values for this sample
+            if(dynamic) {
+                alertData.push(payload.ambient + high);
+                normalData.push(payload.ambient + low);
+            } else {
+                alertData.push(high);
+                normalData.push(low);
+            }
+            if (levelData.length > LEVEL_MAX_POINTS) levelData.shift();
+            if (ambientData.length > LEVEL_MAX_POINTS) ambientData.shift();
+            if (alertData.length > LEVEL_MAX_POINTS) alertData.shift();
+            if (normalData.length > LEVEL_MAX_POINTS) normalData.shift();
+            drawLevelChart();
+        }
+    }
+    if (message.topic === stateTopic) {
+        // handle state if desired
+    }
+}
+
+$('#level-settings-form2').submit(function(e) {
+    e.preventDefault();
+    const interval = parseInt($('#interval').val());
+    const dynamic = !!$("#dynamicSwitch").prop("checked");
+    const alertVal = parseFloat($("#alert").val());
+    const normalVal = parseFloat($("#normal").val());
+    let payload = app.settings.level;
+	payload.interval = interval;
+	payload.dynamic = dynamic;	
+    if(dynamic) {
+        payload.dynamicAlert = alertVal;
+        payload.dynamicNormal = normalVal;
+    } else {
+        payload.fixedAlert = alertVal;
+        payload.fixedNormal = normalVal;
+    }
+    $.ajax({
+        type: "POST",
+        url: "settings",
+        contentType: "application/json",
+        data: JSON.stringify({ level: payload }),
+        success: function() {
+			showToast('Settings saved', 'info');
+		},
+        error: function() {
+			showToast('Failed to save settings', 'warning');
+		}
+    });
+});
+function showToast(message, type = 'danger') {
+    const toastContainer = document.querySelector('.toast-container');
+    
+    // Determine text color class based on type
+    const textColorClass = type === 'warning' ? 'text-dark' : 'text-white';
+    
+    // Create the toast HTML structure
+    var toastHtml = '';
+    toastHtml += '<div class="toast align-items-center ' + textColorClass + ' bg-' + type + ' border-0" role="alert" aria-live="assertive" aria-atomic="true">';
+    toastHtml += '   <div class="d-flex">';
+    toastHtml += '     <div class="toast-body">' + message + '</div>';
+    toastHtml += '     <button type="button" class="btn-close' + (type === 'warning' ? '' : ' btn-close-white') + ' me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>';
+    toastHtml += '   </div>';
+    toastHtml += '</div>';
+    
+    // Rest of the function remains the same
+    toastContainer.insertAdjacentHTML('beforeend', toastHtml);
+    const toastElement = toastContainer.lastElementChild;
+    const toast = new bootstrap.Toast(toastElement, {
+        autohide: true,
+        delay: 4000
+    });
+    toast.show();
+    toastElement.addEventListener('hidden.bs.toast', function() {
+        this.remove();
+    });
+}
+
+</script>
+</body>
+</html>

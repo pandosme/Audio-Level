@@ -1,0 +1,13 @@
+{
+	"WS_Port": 1884,
+	"WSS_Port": 443,
+	"tls": false,
+	"level": {
+		"interval": 2,
+ 		"dynamicAlert": 6,
+		"dynamicNormal": 3,
+		"fixedAlert": -16,
+		"fixedNormal": -20,
+		"dynamic": true
+	}
+}
