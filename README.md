@@ -83,6 +83,9 @@ Topic: pipelevel/level/{SERIAL}
 
 ## History
 
+### 1.0.1 Oct 6, 2025
+- Remove video playback in GUI as it added no value and could conflict with non-camera devices.
+
 ### 1.0.0 Oct 5, 2025
 - Initial public release
 
