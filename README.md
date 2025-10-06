@@ -2,6 +2,8 @@
 
 Audio-Level is a modern ACAP solution for Axis cameras with audio input. It monitors real-time dB-levels, dynamically tracks ambient sound, and publishes robust MQTT events for easy third-party integration and advanced automation.
 
+![Screenshot](images/screenshot.jpg)
+
 ***
 
 ## Key Features
